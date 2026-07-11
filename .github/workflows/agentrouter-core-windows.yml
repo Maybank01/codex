@@ -65,7 +65,7 @@ jobs:
           tool: sccache
           version: 0.7.5
 
-      - name: Enable GitHub Actions sccache backend
+      - name: Configure sccache backend and wrapper
         shell: bash
         run: |
           set -euo pipefail
@@ -73,7 +73,14 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then
             wrapper="$(cygpath -w "$wrapper")"
           fi
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache runner-local fallback"
+          fi
           echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
