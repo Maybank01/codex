@@ -79,7 +79,16 @@ jobs:
 
       - name: Verify formatting
         working-directory: codex-rs
-        run: just fmt-check
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "Rust formatting check failed."
+          }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "Git whitespace check failed."
+          }
 
       - name: Run focused AgentRouter tests
         working-directory: codex-rs
