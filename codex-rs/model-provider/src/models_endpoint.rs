@@ -128,6 +128,25 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
         self.provider_info.has_command_auth()
     }
 
+    fn model_cache_key(&self) -> Option<String> {
+        let auth_mode = self
+            .auth_manager
+            .as_deref()
+            .and_then(AuthManager::get_api_auth_mode);
+        let provider = self.provider_info.to_api_provider(auth_mode).ok()?;
+        let name = provider.name.trim().to_ascii_lowercase();
+        let base_url = provider.base_url.trim().trim_end_matches('/');
+        Some(format!("{name}|{base_url}"))
+    }
+
+    fn supports_api_key_model_discovery(&self) -> bool {
+        self.provider_info.supports_agentrouter_api_key_extensions(
+            self.auth_manager
+                .as_deref()
+                .and_then(AuthManager::get_api_auth_mode),
+        )
+    }
+
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
         Box::pin(OpenAiModelsEndpoint::uses_codex_backend(self))
     }
@@ -352,6 +371,45 @@ mod tests {
         );
 
         assert!(!endpoint.has_command_auth());
+    }
+
+    #[test]
+    fn agentrouter_api_key_provider_enables_model_discovery() {
+        let mut provider = ModelProviderInfo::create_openai_provider(Some(
+            "https://agentrouter.top/v1".to_string(),
+        ));
+        provider.name = "AgentRouter".to_string();
+        let endpoint = OpenAiModelsEndpoint::new(
+            provider,
+            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "test-api-key",
+            ))),
+        );
+
+        assert!(endpoint.supports_api_key_model_discovery());
+        assert_eq!(
+            endpoint.model_cache_key().as_deref(),
+            Some("agentrouter|https://agentrouter.top/v1")
+        );
+    }
+
+    #[test]
+    fn other_api_key_provider_does_not_enable_model_discovery() {
+        let mut provider =
+            ModelProviderInfo::create_openai_provider(Some("https://example.test/v1".to_string()));
+        provider.name = "Other Router".to_string();
+        let endpoint = OpenAiModelsEndpoint::new(
+            provider,
+            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "test-api-key",
+            ))),
+        );
+
+        assert!(!endpoint.supports_api_key_model_discovery());
+        assert_eq!(
+            endpoint.model_cache_key().as_deref(),
+            Some("other router|https://example.test/v1")
+        );
     }
 
     #[tokio::test]

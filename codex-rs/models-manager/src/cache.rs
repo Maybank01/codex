@@ -28,10 +28,15 @@ impl ModelsCacheManager {
     }
 
     /// Attempt to load a fresh cache entry. Returns `None` if the cache doesn't exist or is stale.
-    pub(crate) async fn load_fresh(&self, expected_version: &str) -> Option<ModelsCache> {
+    pub(crate) async fn load_fresh(
+        &self,
+        expected_version: &str,
+        expected_provider_cache_key: Option<&str>,
+    ) -> Option<ModelsCache> {
         info!(
                 cache_path = %self.cache_path.display(),
                 expected_version,
+                expected_provider_cache_key,
             "models cache: attempting load_fresh"
         );
         let cache = match self.load().await {
@@ -44,6 +49,7 @@ impl ModelsCacheManager {
         info!(
             cache_path = %self.cache_path.display(),
             cached_version = ?cache.client_version,
+            cached_provider_cache_key = ?cache.provider_cache_key,
             fetched_at = %cache.fetched_at,
             "models cache: loaded cache file"
         );
@@ -53,6 +59,15 @@ impl ModelsCacheManager {
                 expected_version,
                 cached_version = ?cache.client_version,
                 "models cache: cache version mismatch"
+            );
+            return None;
+        }
+        if cache.provider_cache_key.as_deref() != expected_provider_cache_key {
+            info!(
+                cache_path = %self.cache_path.display(),
+                expected_provider_cache_key,
+                cached_provider_cache_key = ?cache.provider_cache_key,
+                "models cache: provider identity mismatch"
             );
             return None;
         }
@@ -79,11 +94,13 @@ impl ModelsCacheManager {
         models: &[ModelInfo],
         etag: Option<String>,
         client_version: String,
+        provider_cache_key: Option<String>,
     ) {
         let cache = ModelsCache {
             fetched_at: Utc::now(),
             etag,
             client_version: Some(client_version),
+            provider_cache_key,
             models: models.to_vec(),
         };
         if let Err(err) = self.save_internal(&cache).await {
@@ -165,6 +182,8 @@ pub(crate) struct ModelsCache {
     pub(crate) etag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) client_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_cache_key: Option<String>,
     pub(crate) models: Vec<ModelInfo>,
 }
 

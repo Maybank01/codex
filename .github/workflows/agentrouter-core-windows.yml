@@ -1,0 +1,135 @@
+name: agentrouter-core-windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      compatible_shell_version:
+        description: Exact Codex Desktop shell version supported by this Core.
+        required: true
+        type: string
+      compatible_msix_source_package_version:
+        description: Informational Microsoft Store source package version.
+        required: true
+        type: string
+  push:
+    tags:
+      - "agentrouter-core-v*"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-x64:
+    name: Build AgentRouter Core - Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+          components: rustfmt,clippy
+
+      - name: Configure LLVM linker
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Install just
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0
+
+      - name: Install nextest
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest
+          version: 0.9.103
+
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Enable GitHub Actions sccache backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$(command -v sccache)"
+          if command -v cygpath >/dev/null 2>&1; then
+            wrapper="$(cygpath -w "$wrapper")"
+          fi
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+
+      - name: Verify formatting
+        working-directory: codex-rs
+        run: just fmt-check
+
+      - name: Run focused AgentRouter tests
+        working-directory: codex-rs
+        shell: pwsh
+        run: |
+          just test -p codex-model-provider-info test_agentrouter_api_key_extensions_require_explicit_provider_and_auth
+          just test -p codex-model-provider agentrouter_api_key_provider_enables_model_discovery
+          just test -p codex-model-provider other_api_key_provider_does_not_enable_model_discovery
+          just test -p codex-models-manager refresh_available_models_fetches_for_api_key_model_discovery_provider
+          just test -p codex-core hosted_web_search_and_standalone_image_generation_follow_runtime_gates
+          just test -p codex-app-server agentrouter_api_key_executes_standalone_image_generation
+
+      - name: Build Core archive
+        id: package
+        shell: pwsh
+        env:
+          DISPATCH_SHELL_VERSION: ${{ inputs.compatible_shell_version }}
+          DISPATCH_MSIX_VERSION: ${{ inputs.compatible_msix_source_package_version }}
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $releaseConfig = Get-Content ./scripts/agentrouter-core-release.json -Raw | ConvertFrom-Json
+            $expectedTag = "agentrouter-core-v$($releaseConfig.version)"
+            if ($env:GITHUB_REF_NAME -cne $expectedTag) {
+              throw "Core release tag $env:GITHUB_REF_NAME does not match configured version $($releaseConfig.version); expected $expectedTag."
+            }
+          }
+          $packageArgs = @{
+            Target = $env:TARGET
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:DISPATCH_SHELL_VERSION)) {
+            $packageArgs.CompatibleShellVersions = @($env:DISPATCH_SHELL_VERSION)
+          }
+          if (-not [string]::IsNullOrWhiteSpace($env:DISPATCH_MSIX_VERSION)) {
+            $packageArgs.SourcePackageVersion = $env:DISPATCH_MSIX_VERSION
+          }
+          $result = & ./scripts/build-agentrouter-core.ps1 @packageArgs
+          "archive_path=$($result.ArchivePath)" >> $env:GITHUB_OUTPUT
+          "checksum_path=$($result.ChecksumPath)" >> $env:GITHUB_OUTPUT
+          "version=$($result.Version)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Core artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: AgentRouter-CodexCore-win-x64-${{ steps.package.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.checksum_path }}
+          if-no-files-found: error
+
+      - name: Print sccache statistics
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats

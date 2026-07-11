@@ -34,6 +34,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
+const AGENTROUTER_PROVIDER_NAME: &str = "AgentRouter";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
@@ -405,6 +406,18 @@ impl ModelProviderInfo {
                         && !value.trim().is_empty()
                 })
             })
+    }
+
+    /// Returns whether this provider is the explicit AgentRouter API-key route
+    /// that may use OpenAI-compatible Codex extensions.
+    pub fn supports_agentrouter_api_key_extensions(&self, auth_mode: Option<AuthMode>) -> bool {
+        self.requires_openai_auth
+            && self.name.eq_ignore_ascii_case(AGENTROUTER_PROVIDER_NAME)
+            && self
+                .base_url
+                .as_deref()
+                .is_some_and(|base_url| !base_url.trim().is_empty())
+            && auth_mode == Some(AuthMode::ApiKey)
     }
 
     pub fn is_amazon_bedrock(&self) -> bool {

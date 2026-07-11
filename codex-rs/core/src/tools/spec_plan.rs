@@ -378,7 +378,16 @@ fn image_generation_runtime_enabled(turn_context: &TurnContext) -> bool {
             && turn_context
                 .auth_manager
                 .as_deref()
-                .is_some_and(AuthManager::current_auth_uses_codex_backend)))
+                .is_some_and(AuthManager::current_auth_uses_codex_backend))
+        || turn_context
+            .provider
+            .info()
+            .supports_agentrouter_api_key_extensions(
+                turn_context
+                    .auth_manager
+                    .as_deref()
+                    .and_then(AuthManager::get_api_auth_mode),
+            ))
         && turn_context.provider.capabilities().image_generation
         && turn_context
             .model_info

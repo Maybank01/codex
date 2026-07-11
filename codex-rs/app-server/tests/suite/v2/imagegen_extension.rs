@@ -42,6 +42,7 @@ const TINY_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA
 enum ImagegenTestMode {
     Direct,
     CodeModeOnly,
+    AgentRouterApiKey,
 }
 
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
@@ -148,6 +149,85 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
             .any(|text| text.contains("Generated images are saved to")),
         "standalone image generation should not emit the legacy developer-message hint"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agentrouter_api_key_executes_standalone_image_generation() -> Result<()> {
+    let call_id = "agentrouter-image-run-1";
+    let server = responses::start_mock_server().await;
+    mount_image_response(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "models": [] })))
+        .mount(&server)
+        .await;
+
+    responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_function_call_with_namespace(
+                    call_id,
+                    "image_gen",
+                    "imagegen",
+                    &json!({
+                        "prompt": "paint an AgentRouter lighthouse",
+                    })
+                    .to_string(),
+                ),
+                responses::ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("msg-1", "Done"),
+                responses::ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        ImagegenTestMode::AgentRouterApiKey,
+    )?;
+    std::fs::write(
+        codex_home.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-agentrouter-key"}"#,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    start_image_generation_turn(&mut mcp).await?;
+
+    let completed = timeout(
+        DEFAULT_READ_TIMEOUT,
+        wait_for_image_generation_completed(&mut mcp),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let ThreadItem::ImageGeneration(ImageGenerationItem {
+        status,
+        saved_path: Some(saved_path),
+        ..
+    }) = completed.item
+    else {
+        panic!("expected completed AgentRouter image generation item with saved path");
+    };
+    assert_eq!(status, "completed");
+    assert_eq!(std::fs::read(saved_path)?, TINY_PNG_BYTES);
 
     Ok(())
 }
@@ -574,9 +654,10 @@ fn create_config_toml(
     server_uri: &str,
     mode: ImagegenTestMode,
 ) -> std::io::Result<()> {
-    let code_mode_only = match mode {
-        ImagegenTestMode::Direct => "",
-        ImagegenTestMode::CodeModeOnly => "code_mode_only = true",
+    let (provider_name, code_mode_only) = match mode {
+        ImagegenTestMode::Direct => ("OpenAI", ""),
+        ImagegenTestMode::CodeModeOnly => ("OpenAI", "code_mode_only = true"),
+        ImagegenTestMode::AgentRouterApiKey => ("AgentRouter", ""),
     };
     std::fs::write(
         codex_home.join("config.toml"),
@@ -592,7 +673,7 @@ chatgpt_base_url = "{server_uri}"
 {code_mode_only}
 
 [model_providers.openai-custom]
-name = "OpenAI"
+name = "{provider_name}"
 base_url = "{server_uri}/api/codex"
 wire_api = "responses"
 request_max_retries = 0

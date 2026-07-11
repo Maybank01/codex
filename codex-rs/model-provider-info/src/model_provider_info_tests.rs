@@ -233,6 +233,26 @@ fn test_uses_openai_actor_authorization() {
 }
 
 #[test]
+fn test_agentrouter_api_key_extensions_require_explicit_provider_and_auth() {
+    let mut provider = ModelProviderInfo {
+        name: "AgentRouter".to_string(),
+        base_url: Some("https://agentrouter.top/v1".to_string()),
+        requires_openai_auth: true,
+        ..ModelProviderInfo::default()
+    };
+
+    assert!(provider.supports_agentrouter_api_key_extensions(Some(AuthMode::ApiKey)));
+    assert!(!provider.supports_agentrouter_api_key_extensions(Some(AuthMode::Chatgpt)));
+
+    provider.name = "Other Router".to_string();
+    assert!(!provider.supports_agentrouter_api_key_extensions(Some(AuthMode::ApiKey)));
+
+    provider.name = "AgentRouter".to_string();
+    provider.base_url = None;
+    assert!(!provider.supports_agentrouter_api_key_extensions(Some(AuthMode::ApiKey)));
+}
+
+#[test]
 fn test_deserialize_provider_auth_config_defaults() {
     let base_dir = tempdir().unwrap();
     let provider_toml = r#"

@@ -264,6 +264,19 @@ fn use_chatgpt_auth(turn: &mut TurnContext) {
     );
 }
 
+fn use_custom_api_key_provider(turn: &mut TurnContext, provider_name: &str, base_url: &str) {
+    let mut provider_info = ModelProviderInfo::create_openai_provider(Some(base_url.to_string()));
+    provider_info.name = provider_name.to_string();
+    turn.auth_manager = Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+        "test-api-key",
+    )));
+    update_config(turn, |config| {
+        config.model_provider_id = provider_name.to_ascii_lowercase();
+        config.model_provider = provider_info.clone();
+    });
+    turn.provider = create_model_provider(provider_info, turn.auth_manager.clone());
+}
+
 fn use_bedrock_provider(turn: &mut TurnContext) {
     let provider_info = ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None);
     update_config(turn, |config| {
@@ -1525,6 +1538,32 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     )
     .await;
     image_generation.assert_visible_contains(&["image_gen"]);
+
+    let agentrouter_api_key = probe_with(
+        |turn| {
+            use_custom_api_key_provider(turn, "AgentRouter", "https://agentrouter.top/v1");
+            turn.model_info.input_modalities = vec![InputModality::Image];
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![image_generation_tool.clone()],
+            ..Default::default()
+        },
+    )
+    .await;
+    agentrouter_api_key.assert_visible_contains(&["image_gen"]);
+
+    let other_api_key_provider = probe_with(
+        |turn| {
+            use_custom_api_key_provider(turn, "Other Router", "https://example.test/v1");
+            turn.model_info.input_modalities = vec![InputModality::Image];
+        },
+        ToolPlanInputs {
+            extension_tool_executors: vec![image_generation_tool.clone()],
+            ..Default::default()
+        },
+    )
+    .await;
+    other_api_key_provider.assert_visible_lacks(&["image_gen"]);
 
     let extension_disabled = probe_with(
         |turn| {

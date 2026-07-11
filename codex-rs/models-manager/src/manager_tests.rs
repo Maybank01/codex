@@ -77,6 +77,8 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 #[derive(Debug)]
 struct TestModelsEndpoint {
     has_command_auth: bool,
+    supports_api_key_model_discovery: bool,
+    model_cache_key: Option<String>,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
@@ -87,6 +89,8 @@ impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_command_auth: false,
+            supports_api_key_model_discovery: false,
+            model_cache_key: None,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -97,7 +101,21 @@ impl TestModelsEndpoint {
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
             has_command_auth: false,
+            supports_api_key_model_discovery: false,
+            model_cache_key: None,
             uses_codex_backend: false,
+            responses: Mutex::new(responses.into()),
+            fetch_count: AtomicUsize::new(0),
+            observed_proxy_policy: Mutex::new(None),
+        })
+    }
+
+    fn with_cache_key(responses: Vec<Vec<ModelInfo>>, model_cache_key: &str) -> Arc<Self> {
+        Arc::new(Self {
+            has_command_auth: false,
+            supports_api_key_model_discovery: false,
+            model_cache_key: Some(model_cache_key.to_string()),
+            uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
             observed_proxy_policy: Mutex::new(None),
@@ -162,6 +180,14 @@ impl ExternalAuth for TestUnresolvedExternalApiKeyAuth {
 impl ModelsEndpointClient for TestModelsEndpoint {
     fn has_command_auth(&self) -> bool {
         self.has_command_auth
+    }
+
+    fn supports_api_key_model_discovery(&self) -> bool {
+        self.supports_api_key_model_discovery
+    }
+
+    fn model_cache_key(&self) -> Option<String> {
+        self.model_cache_key.clone()
     }
 
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
@@ -641,6 +667,47 @@ async fn refresh_available_models_keeps_merging_for_api_auth() {
     let codex_home = tempdir().expect("temp dir");
     let endpoint = Arc::new(TestModelsEndpoint {
         has_command_auth: true,
+        supports_api_key_model_discovery: false,
+        model_cache_key: None,
+        uses_codex_backend: false,
+        responses: Mutex::new(vec![remote_models.clone()].into()),
+        fetch_count: AtomicUsize::new(0),
+        observed_proxy_policy: Mutex::new(None),
+    });
+    let manager = openai_manager_for_tests_with_auth(
+        codex_home.path().to_path_buf(),
+        endpoint.clone(),
+        Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+            "test-api-key",
+        ))),
+    );
+    let mut expected = load_remote_models_from_file().expect("bundled models should parse");
+    expected.extend(remote_models);
+
+    manager
+        .refresh_available_models(
+            RefreshStrategy::OnlineIfUncached,
+            &DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await
+        .expect("refresh succeeds");
+
+    assert_eq!(manager.get_remote_models().await, expected);
+    assert_eq!(endpoint.fetch_count(), 1, "expected a single model fetch");
+}
+
+#[tokio::test]
+async fn refresh_available_models_fetches_for_api_key_model_discovery_provider() {
+    let remote_models = vec![remote_model(
+        "api-key-provider-remote",
+        "API Key Provider Remote",
+        /*priority*/ 0,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = Arc::new(TestModelsEndpoint {
+        has_command_auth: false,
+        supports_api_key_model_discovery: true,
+        model_cache_key: Some("agentrouter|https://agentrouter.top/v1".to_string()),
         uses_codex_backend: false,
         responses: Mutex::new(vec![remote_models.clone()].into()),
         fetch_count: AtomicUsize::new(0),
@@ -697,6 +764,55 @@ async fn refresh_available_models_uses_cache_when_fresh() {
         endpoint.fetch_count(),
         1,
         "cache hit should avoid a second model fetch"
+    );
+}
+
+#[tokio::test]
+async fn refresh_available_models_refetches_after_provider_switch() {
+    let first_models = vec![remote_model(
+        "provider-a",
+        "Provider A",
+        /*priority*/ 1,
+    )];
+    let second_models = vec![remote_model(
+        "provider-b",
+        "Provider B",
+        /*priority*/ 2,
+    )];
+    let codex_home = tempdir().expect("temp dir");
+    let first_endpoint =
+        TestModelsEndpoint::with_cache_key(vec![first_models], "provider-a|https://a.example/v1");
+    let first_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), first_endpoint.clone());
+
+    first_manager
+        .refresh_available_models(
+            RefreshStrategy::OnlineIfUncached,
+            &DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await
+        .expect("first provider refresh succeeds");
+    assert_eq!(first_endpoint.fetch_count(), 1);
+
+    let second_endpoint = TestModelsEndpoint::with_cache_key(
+        vec![second_models.clone()],
+        "provider-b|https://b.example/v1",
+    );
+    let second_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), second_endpoint.clone());
+    second_manager
+        .refresh_available_models(
+            RefreshStrategy::OnlineIfUncached,
+            &DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await
+        .expect("second provider refresh succeeds");
+
+    assert_models_contain(&second_manager.get_remote_models().await, &second_models);
+    assert_eq!(
+        second_endpoint.fetch_count(),
+        1,
+        "provider identity mismatch must bypass the previous provider's fresh cache"
     );
 }
 

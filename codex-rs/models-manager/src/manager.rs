@@ -35,6 +35,20 @@ pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
     /// Returns whether this provider can authenticate command-scoped requests.
     fn has_command_auth(&self) -> bool;
 
+    /// Returns a stable, non-secret identity for the remote model catalog.
+    ///
+    /// Cache entries are reusable only when this identity matches, preventing
+    /// one provider's catalog from being reused after a provider switch.
+    fn model_cache_key(&self) -> Option<String> {
+        None
+    }
+
+    /// Returns whether an explicitly supported API-key provider publishes a
+    /// remote Codex model catalog.
+    fn supports_api_key_model_discovery(&self) -> bool {
+        false
+    }
+
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool>;
 
@@ -382,13 +396,20 @@ impl OpenAiModelsManager {
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
         self.cache_manager
-            .persist_cache(&models, etag, client_version)
+            .persist_cache(
+                &models,
+                etag,
+                client_version,
+                self.endpoint_client.model_cache_key(),
+            )
             .await;
         Ok(())
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.has_command_auth()
+            || self.endpoint_client.supports_api_key_model_discovery()
     }
 
     async fn get_etag(&self) -> Option<String> {
@@ -433,9 +454,12 @@ impl OpenAiModelsManager {
             codex_otel::start_global_timer("codex.remote_models.load_cache.duration_ms", &[]);
         let client_version = crate::client_version_to_whole();
         info!(client_version, "models cache: evaluating cache eligibility");
-        // TODO(celia-oai): Include provider identity in cache eligibility so switching
-        // providers does not reuse a fresh models_cache.json entry from another provider.
-        let cache = match self.cache_manager.load_fresh(&client_version).await {
+        let provider_cache_key = self.endpoint_client.model_cache_key();
+        let cache = match self
+            .cache_manager
+            .load_fresh(&client_version, provider_cache_key.as_deref())
+            .await
+        {
             Some(cache) => cache,
             None => {
                 info!("models cache: no usable cache entry");
