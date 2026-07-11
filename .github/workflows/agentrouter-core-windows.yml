@@ -78,7 +78,7 @@ jobs:
             echo "Using sccache GitHub backend"
           else
             echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_DIR=${GITHUB_WORKSPACE}/.sccache" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
             echo "Using sccache runner-local fallback"
           fi
           echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
