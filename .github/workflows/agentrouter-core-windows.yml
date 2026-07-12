@@ -24,10 +24,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-windows-x64:
-    name: Build AgentRouter Core - Windows x64
+  validate-windows-x64:
+    name: Validate AgentRouter Core - Windows x64
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 75
     env:
       TARGET: x86_64-pc-windows-msvc
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -107,6 +107,59 @@ jobs:
           just test -p codex-models-manager refresh_available_models_fetches_for_api_key_model_discovery_provider
           just test -p codex-core hosted_web_search_and_standalone_image_generation_follow_runtime_gates
           just test -p codex-app-server agentrouter_api_key_executes_standalone_image_generation
+
+      - name: Print sccache statistics
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+
+  build-windows-x64:
+    name: Build AgentRouter Core - Windows x64
+    runs-on: windows-2025
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Configure LLVM linker
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Install sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Configure sccache backend and wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrapper="$(command -v sccache)"
+          if command -v cygpath >/dev/null 2>&1; then
+            wrapper="$(cygpath -w "$wrapper")"
+          fi
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${RUNNER_TEMP}/sccache" >> "$GITHUB_ENV"
+            echo "Using sccache runner-local fallback"
+          fi
+          echo "RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_RUSTC_WRAPPER=$wrapper" >> "$GITHUB_ENV"
 
       - name: Build Core archive
         id: package
