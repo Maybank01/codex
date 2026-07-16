@@ -473,6 +473,42 @@ direct_only_tool_namespaces = ["mcp__history", "mcp__notes"]
 }
 
 #[tokio::test]
+async fn load_config_defaults_image_generation_to_direct_only() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.code_mode.direct_only_tool_namespaces,
+        vec!["image_gen".to_string()]
+    );
+
+    let explicitly_disabled = Config::load_from_base_config_with_overrides(
+        toml::from_str(
+            r#"
+[features.code_mode]
+direct_only_tool_namespaces = []
+"#,
+        )
+        .expect("TOML deserialization should succeed"),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(
+        explicitly_disabled
+            .code_mode
+            .direct_only_tool_namespaces
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_resolves_token_budget_config() -> std::io::Result<()> {
     for (config_toml, expected) in [
         (

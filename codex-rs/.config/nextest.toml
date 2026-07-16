@@ -37,6 +37,13 @@ filter = 'test(rmcp_client) | test(humanlike_typing_1000_chars_appears_live_no_p
 slow-timeout = { period = "1m", terminate-after = 4 }
 
 [[profile.default.overrides]]
+# This regression intentionally holds the image backend response for 75 seconds to verify that
+# direct image generation outlives the former nested code-mode lifecycle budget.
+platform = 'cfg(windows)'
+filter = 'package(codex-app-server) & test(code_mode_only_direct_image_generation_survives_slow_large_backend)'
+slow-timeout = { period = "120s", terminate-after = 1 }
+
+[[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 

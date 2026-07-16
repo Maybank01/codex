@@ -2489,10 +2489,13 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
             .and_then(|config| config.excluded_tool_namespaces.as_ref())
             .cloned()
             .unwrap_or_default(),
+        // Image generation can legitimately outlive the nested code-mode executor lifecycle.
+        // Keep it on the direct extension path unless the user explicitly supplies a list,
+        // including an empty list to opt out.
         direct_only_tool_namespaces: base
             .and_then(|config| config.direct_only_tool_namespaces.as_ref())
             .cloned()
-            .unwrap_or_default(),
+            .unwrap_or_else(|| vec!["image_gen".to_string()]),
     }
 }
 

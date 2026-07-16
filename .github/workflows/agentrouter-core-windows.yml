@@ -105,8 +105,10 @@ jobs:
           just test -p codex-model-provider agentrouter_api_key_provider_enables_model_discovery
           just test -p codex-model-provider other_api_key_provider_does_not_enable_model_discovery
           just test -p codex-models-manager refresh_available_models_fetches_for_api_key_model_discovery_provider
+          just test -p codex-core load_config_defaults_image_generation_to_direct_only
           just test -p codex-core hosted_web_search_and_standalone_image_generation_follow_runtime_gates
           just test -p codex-app-server agentrouter_api_key_executes_standalone_image_generation
+          just test -p codex-app-server code_mode_only_direct_image_generation_survives_slow_large_backend
 
       - name: Print sccache statistics
         if: always()

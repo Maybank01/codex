@@ -1098,11 +1098,10 @@ async fn code_mode_only_exposes_configured_dynamic_namespace_directly() {
             });
         },
         ToolPlanInputs {
-            dynamic_tools: vec![dynamic_tool(
-                Some("direct_only"),
-                "lookup",
-                /*defer_loading*/ true,
-            )],
+            dynamic_tools: vec![
+                dynamic_tool(Some("direct_only"), "lookup", /*defer_loading*/ true),
+                dynamic_tool(Some("nested"), "lookup", /*defer_loading*/ false),
+            ],
             ..ToolPlanInputs::default()
         },
     )
@@ -1126,7 +1125,8 @@ async fn code_mode_only_exposes_configured_dynamic_namespace_directly() {
     let ToolSpec::Freeform(exec) = plan.visible_spec(codex_code_mode::PUBLIC_TOOL_NAME) else {
         panic!("expected code mode exec tool");
     };
-    assert!(!exec.description.contains("direct_only_lookup(args:"));
+    assert!(!exec.description.contains("direct_only__lookup(args:"));
+    assert!(exec.description.contains("nested__lookup(args:"));
 }
 
 #[tokio::test]

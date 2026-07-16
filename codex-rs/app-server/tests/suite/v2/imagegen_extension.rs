@@ -1,3 +1,7 @@
+#[cfg(windows)]
+use std::io::Read;
+#[cfg(windows)]
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -7,11 +11,19 @@ use app_test_support::ChatGptAuthFixture;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
+#[cfg(windows)]
+use base64::Engine;
+#[cfg(windows)]
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_app_server_protocol::ImageGenerationItem;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadItem;
+#[cfg(windows)]
+use codex_app_server_protocol::ThreadReadParams;
+#[cfg(windows)]
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -20,6 +32,12 @@ use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_config::types::AuthCredentialsStoreMode;
 use core_test_support::responses;
 use core_test_support::skip_if_remote;
+#[cfg(windows)]
+use flate2::Compression;
+#[cfg(windows)]
+use flate2::read::ZlibDecoder;
+#[cfg(windows)]
+use flate2::write::ZlibEncoder;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -43,6 +61,7 @@ enum ImagegenTestMode {
     Direct,
     CodeModeOnly,
     AgentRouterApiKey,
+    AgentRouterCodeModeOnly,
 }
 
 // macOS and Windows Bazel CI can spend tens of seconds starting app-server
@@ -51,6 +70,8 @@ enum ImagegenTestMode {
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(any(target_os = "macos", windows)))]
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+const SLOW_IMAGE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[tokio::test]
 async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Result<()> {
@@ -376,7 +397,7 @@ async fn standalone_image_edit_uses_recent_pathless_image() -> Result<()> {
 }
 
 #[tokio::test]
-async fn standalone_image_generation_is_exposed_in_code_mode_only() -> Result<()> {
+async fn standalone_image_generation_is_exposed_directly_in_code_mode_only() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response_mock = responses::mount_sse_once(
         &server,
@@ -412,36 +433,37 @@ async fn standalone_image_generation_is_exposed_in_code_mode_only() -> Result<()
     )
     .await??;
 
-    assert!(
-        response_mock
-            .single_request()
-            .body_contains_text("image_gen__imagegen")
-    );
+    let request = response_mock.single_request();
+    assert!(request.tool_by_name("image_gen", "imagegen").is_some());
+    assert!(!request.body_contains_text("image_gen__imagegen"));
 
     Ok(())
 }
 
-#[cfg(not(windows))]
+#[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn standalone_image_generation_is_callable_from_code_mode_only() -> Result<()> {
-    let call_id = "code-mode-image-run-1";
+async fn code_mode_only_direct_image_generation_survives_slow_large_backend() -> Result<()> {
+    let call_id = "slow-large-image-run-1";
     let server = responses::start_mock_server().await;
-    mount_image_response(&server).await;
+    let png = large_png_fixture()?;
+    let result = BASE64_STANDARD.encode(&png);
+    mount_delayed_image_response(&server, &result, Duration::from_secs(75)).await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "models": [] })))
+        .mount(&server)
+        .await;
 
     let response_mock = responses::mount_sse_sequence(
         &server,
         vec![
             responses::sse(vec![
                 responses::ev_response_created("resp-1"),
-                responses::ev_custom_tool_call(
+                responses::ev_function_call_with_namespace(
                     call_id,
-                    "exec",
-                    r#"
-const result = await tools.image_gen__imagegen({
-  prompt: "paint a blue whale",
-});
-generatedImage(result);
-"#,
+                    "image_gen",
+                    "imagegen",
+                    &json!({"prompt": "paint a lighthouse in a storm"}).to_string(),
                 ),
                 responses::ev_completed("resp-1"),
             ]),
@@ -457,12 +479,11 @@ generatedImage(result);
     create_config_toml(
         codex_home.path(),
         &server.uri(),
-        ImagegenTestMode::CodeModeOnly,
+        ImagegenTestMode::AgentRouterCodeModeOnly,
     )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("access-chatgpt"),
-        AuthCredentialsStoreMode::File,
+    std::fs::write(
+        codex_home.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-agentrouter-key"}"#,
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -471,36 +492,80 @@ generatedImage(result);
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_image_generation_turn(&mut mcp).await?;
+    let thread_id = start_image_generation_turn(&mut mcp).await?;
+
+    let completed = timeout(
+        SLOW_IMAGE_READ_TIMEOUT,
+        wait_for_image_generation_completed(&mut mcp),
+    )
+    .await??;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
 
+    let ThreadItem::ImageGeneration(ImageGenerationItem {
+        status,
+        result: completed_result,
+        saved_path: Some(saved_path),
+        ..
+    }) = completed.item
+    else {
+        panic!("expected completed image generation item with saved path");
+    };
+    assert_eq!(status, "completed");
+    assert!(!completed_result.is_empty());
+    assert_eq!(completed_result, result);
+    let saved_png = std::fs::read(&saved_path)?;
+    assert_eq!(saved_png, png);
+    assert_valid_png(&saved_png, 640, 640)?;
+
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].body_contains_text("image_gen__imagegen"));
-    let output = requests[1].custom_tool_call_output(call_id);
-    assert_eq!(
-        output["output"][1],
-        json!({
-            "type": "input_image",
-            "image_url": format!("data:image/png;base64,{RESULT}"),
-            "detail": "high",
-        })
-    );
+    assert!(requests[0].tool_by_name("image_gen", "imagegen").is_some());
+    assert!(!requests[0].body_contains_text("image_gen__imagegen"));
     assert!(
-        output["output"][2]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Generated images are saved"))
+        requests[0].body_json()["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "exec")),
+        "other tools should remain behind the code-mode executor"
     );
-    assert_eq!(output["output"].as_array().map(Vec::len), Some(3));
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id,
+            include_turns: true,
+        })
+        .await?;
+    let read_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_response)?;
+    let persisted = thread
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .find(|item| matches!(item, ThreadItem::ImageGeneration(image) if image.id == call_id))
+        .context("thread/read should preserve the imageGeneration item for Shell rendering")?;
+    let ThreadItem::ImageGeneration(persisted_image) = persisted else {
+        unreachable!("matching item should be image generation");
+    };
+    assert_eq!(persisted_image.status, "completed");
+    assert_eq!(persisted_image.saved_path.as_ref(), Some(&saved_path));
+    let persisted_wire_item = serde_json::to_value(persisted)?;
+    assert_eq!(persisted_wire_item["type"], "imageGeneration");
+    assert_eq!(
+        persisted_wire_item["savedPath"],
+        saved_path.display().to_string()
+    );
 
     Ok(())
 }
 
-async fn start_image_generation_turn(mcp: &mut TestAppServer) -> Result<()> {
+async fn start_image_generation_turn(mcp: &mut TestAppServer) -> Result<String> {
     start_turn(
         mcp,
         vec![V2UserInput::Text {
@@ -578,7 +643,7 @@ async fn run_image_edit_test(
         .body_json::<serde_json::Value>()?)
 }
 
-async fn start_turn(mcp: &mut TestAppServer, input: Vec<V2UserInput>) -> Result<()> {
+async fn start_turn(mcp: &mut TestAppServer, input: Vec<V2UserInput>) -> Result<String> {
     let thread_req = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams::default())
         .await?;
@@ -588,10 +653,11 @@ async fn start_turn(mcp: &mut TestAppServer, input: Vec<V2UserInput>) -> Result<
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let thread_id = thread.id;
 
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
-            thread_id: thread.id,
+            thread_id: thread_id.clone(),
             client_user_message_id: None,
             input,
             ..Default::default()
@@ -604,7 +670,7 @@ async fn start_turn(mcp: &mut TestAppServer, input: Vec<V2UserInput>) -> Result<
     .await??;
     let _turn: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
 
-    Ok(())
+    Ok(thread_id)
 }
 
 async fn wait_for_image_generation_completed(
@@ -637,6 +703,143 @@ async fn mount_image_response(server: &MockServer) {
         .await;
 }
 
+#[cfg(windows)]
+async fn mount_delayed_image_response(server: &MockServer, result: &str, delay: Duration) {
+    Mock::given(method("POST"))
+        .and(path("/api/codex/images/generations"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(delay)
+                .set_body_json(json!({
+                    "created": 1,
+                    "data": [{"b64_json": result}],
+                })),
+        )
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[cfg(windows)]
+fn large_png_fixture() -> Result<Vec<u8>> {
+    const WIDTH: u32 = 640;
+    const HEIGHT: u32 = 640;
+    let mut raw = Vec::with_capacity((HEIGHT * (1 + WIDTH * 4)) as usize);
+    let mut state = 0x6d2b_79f5_u32;
+    for _ in 0..HEIGHT {
+        raw.resize(raw.len() + 1, 0);
+        for _ in 0..WIDTH {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            raw.extend_from_slice(&state.to_be_bytes());
+        }
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&raw)?;
+    let compressed = encoder.finish()?;
+
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&WIDTH.to_be_bytes());
+    ihdr.extend_from_slice(&HEIGHT.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    append_png_chunk(&mut png, *b"IHDR", &ihdr);
+    append_png_chunk(&mut png, *b"IDAT", &compressed);
+    append_png_chunk(&mut png, *b"IEND", &[]);
+
+    anyhow::ensure!(png.len() > 1024 * 1024, "PNG fixture should exceed 1 MiB");
+    assert_valid_png(&png, WIDTH, HEIGHT)?;
+    Ok(png)
+}
+
+#[cfg(windows)]
+fn append_png_chunk(png: &mut Vec<u8>, chunk_type: [u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    png.extend_from_slice(&chunk_type);
+    png.extend_from_slice(data);
+    let mut crc_input = Vec::with_capacity(chunk_type.len() + data.len());
+    crc_input.extend_from_slice(&chunk_type);
+    crc_input.extend_from_slice(data);
+    png.extend_from_slice(&png_crc32(&crc_input).to_be_bytes());
+}
+
+#[cfg(windows)]
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[cfg(windows)]
+fn assert_valid_png(png: &[u8], expected_width: u32, expected_height: u32) -> Result<()> {
+    anyhow::ensure!(
+        png.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "invalid PNG signature"
+    );
+    let mut offset = 8;
+    let mut idat = Vec::new();
+    let mut saw_ihdr = false;
+    let mut saw_iend = false;
+    while offset < png.len() {
+        anyhow::ensure!(offset + 12 <= png.len(), "truncated PNG chunk");
+        let length = u32::from_be_bytes(png[offset..offset + 4].try_into()?) as usize;
+        let chunk_type: [u8; 4] = png[offset + 4..offset + 8].try_into()?;
+        let data_start = offset + 8;
+        let data_end = data_start + length;
+        anyhow::ensure!(data_end + 4 <= png.len(), "truncated PNG chunk body");
+        let expected_crc = u32::from_be_bytes(png[data_end..data_end + 4].try_into()?);
+        anyhow::ensure!(
+            png_crc32(&png[offset + 4..data_end]) == expected_crc,
+            "invalid PNG chunk CRC"
+        );
+        match &chunk_type {
+            b"IHDR" => {
+                anyhow::ensure!(length == 13, "invalid IHDR length");
+                let width = u32::from_be_bytes(png[data_start..data_start + 4].try_into()?);
+                let height = u32::from_be_bytes(png[data_start + 4..data_start + 8].try_into()?);
+                anyhow::ensure!(
+                    width == expected_width && height == expected_height,
+                    "unexpected PNG dimensions"
+                );
+                anyhow::ensure!(
+                    png[data_start + 8..data_end] == [8, 6, 0, 0, 0],
+                    "unexpected PNG encoding"
+                );
+                saw_ihdr = true;
+            }
+            b"IDAT" => idat.extend_from_slice(&png[data_start..data_end]),
+            b"IEND" => {
+                anyhow::ensure!(length == 0, "invalid IEND length");
+                saw_iend = true;
+            }
+            _ => {}
+        }
+        offset = data_end + 4;
+    }
+    anyhow::ensure!(saw_ihdr && saw_iend && !idat.is_empty(), "incomplete PNG");
+
+    let mut decoded = Vec::new();
+    ZlibDecoder::new(idat.as_slice()).read_to_end(&mut decoded)?;
+    let row_bytes = 1 + expected_width as usize * 4;
+    anyhow::ensure!(
+        decoded.len() == row_bytes * expected_height as usize,
+        "unexpected decoded PNG size"
+    );
+    anyhow::ensure!(
+        decoded.chunks_exact(row_bytes).all(|row| row[0] == 0),
+        "unexpected PNG row filter"
+    );
+    Ok(())
+}
+
 async fn mount_image_edit_response(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/api/codex/images/edits"))
@@ -654,10 +857,17 @@ fn create_config_toml(
     server_uri: &str,
     mode: ImagegenTestMode,
 ) -> std::io::Result<()> {
-    let (provider_name, code_mode_only) = match mode {
+    let (provider_name, feature_config) = match mode {
         ImagegenTestMode::Direct => ("OpenAI", ""),
-        ImagegenTestMode::CodeModeOnly => ("OpenAI", "code_mode_only = true"),
+        ImagegenTestMode::CodeModeOnly => (
+            "OpenAI",
+            "code_mode_only = true\n\n[features.code_mode]\ndirect_only_tool_namespaces = [\"image_gen\"]",
+        ),
         ImagegenTestMode::AgentRouterApiKey => ("AgentRouter", ""),
+        ImagegenTestMode::AgentRouterCodeModeOnly => (
+            "AgentRouter",
+            "code_mode_only = true\n\n[features.code_mode]\ndirect_only_tool_namespaces = [\"image_gen\"]",
+        ),
     };
     std::fs::write(
         codex_home.join("config.toml"),
@@ -670,7 +880,7 @@ model_provider = "openai-custom"
 chatgpt_base_url = "{server_uri}"
 
 [features]
-{code_mode_only}
+{feature_config}
 
 [model_providers.openai-custom]
 name = "{provider_name}"
