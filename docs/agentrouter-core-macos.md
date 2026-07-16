@@ -21,5 +21,5 @@ acceptance.
 
 Repository Actions secrets required for publishable runs are
 `APPLE_CERTIFICATE_BASE64`, `APPLE_CERTIFICATE_PASSWORD`,
-`APPLE_SIGNING_IDENTITY`, `APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, and
-`APPLE_API_ISSUER_ID`.
+`APPLE_API_KEY_P8_BASE64`, `APPLE_API_KEY_ID`, and `APPLE_API_ISSUER_ID`. The
+workflow derives the exact signing identity from the imported temporary keychain.
