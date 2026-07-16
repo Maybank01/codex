@@ -1,0 +1,172 @@
+name: agentrouter-core-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      compatible_shell_version:
+        description: Exact Codex Desktop Shell version supported by this Core.
+        required: false
+        type: string
+      signing_mode:
+        description: Developer ID is mandatory for publishable components; ad-hoc is an internal probe.
+        required: true
+        default: ad-hoc
+        type: choice
+        options: [ad-hoc, required]
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agentrouter-core-macos.yml"
+      - "scripts/agentrouter-core-release.json"
+      - "scripts/package_agentrouter_core_macos.py"
+      - "scripts/tests/test_package_agentrouter_core_macos.py"
+    tags:
+      - "agentrouter-core-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-packager:
+    name: Validate macOS Core packager
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Run packaging unit tests
+        run: python3 -m unittest scripts/tests/test_package_agentrouter_core_macos.py
+
+  build-macos:
+    name: Build AgentRouter Core - macOS ${{ matrix.arch }}
+    needs: test-packager
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-15
+          - arch: x64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_BUILD_RUSTC_WRAPPER: sccache
+      SIGNING_REQUIRED: ${{ github.ref_type == 'tag' || github.ref == 'refs/heads/main' || inputs.signing_mode == 'required' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Configure shared Rust compiler cache
+        uses: mozilla-actions/sccache-action@d651010b8da762cde178750d8eda7b5febfe147a # v0.0.9
+        with:
+          version: v0.10.0
+
+      - name: Build Codex Core
+        working-directory: codex-rs
+        run: cargo build --locked --target "${{ matrix.target }}" --release --bin codex
+
+      - name: Import Developer ID certificate
+        if: env.SIGNING_REQUIRED == 'true'
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE_BASE64"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          keychain="$RUNNER_TEMP/agentrouter-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+
+      - name: Sign Core executable
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          binary="codex-rs/target/${{ matrix.target }}/release/codex"
+          if [[ "$SIGNING_REQUIRED" == "true" ]]; then
+            test -n "$APPLE_SIGNING_IDENTITY"
+            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+          else
+            codesign --force --sign - "$binary"
+          fi
+          codesign --verify --strict --verbose=2 "$binary"
+          "$binary" --version
+
+      - name: Package immutable Core component
+        env:
+          DISPATCH_SHELL_VERSION: ${{ inputs.compatible_shell_version }}
+        run: |
+          set -euo pipefail
+          args=(
+            --binary "codex-rs/target/${{ matrix.target }}/release/codex"
+            --target "${{ matrix.target }}"
+            --output-directory dist/agentrouter-core
+          )
+          if [[ -n "${DISPATCH_SHELL_VERSION:-}" ]]; then
+            args+=(--compatible-shell-version "$DISPATCH_SHELL_VERSION")
+          fi
+          if [[ "$SIGNING_REQUIRED" == "true" ]]; then
+            args+=(--require-developer-id --notarization-expected)
+          fi
+          python3 scripts/package_agentrouter_core_macos.py "${args[@]}" | tee "$RUNNER_TEMP/core-package.json"
+
+      - name: Notarize exact Core archive
+        if: env.SIGNING_REQUIRED == 'true'
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_API_KEY_P8_BASE64"
+          test -n "$APPLE_API_KEY_ID"
+          test -n "$APPLE_API_ISSUER_ID"
+          key="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$key"
+          archive="$(find dist/agentrouter-core -maxdepth 1 -name 'CodexCore-mac-${{ matrix.arch }}-*.zip' -print -quit)"
+          test -n "$archive"
+          xcrun notarytool submit "$archive" --key "$key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID" --wait --output-format json | tee "$RUNNER_TEMP/notary-result.json"
+          python3 - "$RUNNER_TEMP/notary-result.json" <<'PY'
+          import json, sys
+          result = json.load(open(sys.argv[1], encoding="utf-8"))
+          if result.get("status") != "Accepted":
+              raise SystemExit(f"Notarization was not accepted: {result}")
+          PY
+
+      - name: Upload controlled Core candidate
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: AgentRouter-CodexCore-mac-${{ matrix.arch }}
+          path: |
+            dist/agentrouter-core/CodexCore-mac-${{ matrix.arch }}-*.zip
+            dist/agentrouter-core/CodexCore-mac-${{ matrix.arch }}-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Print compiler cache statistics
+        if: always()
+        run: sccache --show-stats || true
