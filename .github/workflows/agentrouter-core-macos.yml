@@ -100,16 +100,19 @@ jobs:
           security import "$RUNNER_TEMP/developer-id.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security list-keychains -d user -s "$keychain"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          signing_identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ {print $2; exit}')"
+          test -n "$signing_identity"
+          echo "APPLE_SIGNING_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
+          echo "APPLE_SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
       - name: Sign Core executable
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           binary="codex-rs/target/${{ matrix.target }}/release/codex"
           if [[ "$SIGNING_REQUIRED" == "true" ]]; then
             test -n "$APPLE_SIGNING_IDENTITY"
-            codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$binary"
+            test -n "$APPLE_SIGNING_KEYCHAIN"
+            codesign --force --options runtime --timestamp --keychain "$APPLE_SIGNING_KEYCHAIN" --sign "$APPLE_SIGNING_IDENTITY" "$binary"
           else
             codesign --force --sign - "$binary"
           fi
