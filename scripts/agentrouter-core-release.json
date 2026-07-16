@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "0.145.0-agentrouter.2",
+  "version": "0.145.0-agentrouter.3",
   "upstream_repository": "https://github.com/openai/codex",
   "upstream_sha": "385c0a9351e2199929e01f7864ec78a8f7d5e580",
   "compatible_shell_versions": [
