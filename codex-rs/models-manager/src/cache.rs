@@ -34,9 +34,9 @@ impl ModelsCacheManager {
         expected_provider_cache_key: Option<&str>,
     ) -> Option<ModelsCache> {
         info!(
-                cache_path = %self.cache_path.display(),
-                expected_version,
-                expected_provider_cache_key,
+            cache_path = %self.cache_path.display(),
+            expected_version,
+            expected_provider_cache_key,
             "models cache: attempting load_fresh"
         );
         let cache = match self.load().await {

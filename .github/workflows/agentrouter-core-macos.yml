@@ -55,7 +55,9 @@ jobs:
             target: x86_64-apple-darwin
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    # A cold Intel release build can exceed three hours; sccache makes later
+    # candidates faster, but the first controlled build must not be truncated.
+    timeout-minutes: 360
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       SCCACHE_GHA_ENABLED: "true"

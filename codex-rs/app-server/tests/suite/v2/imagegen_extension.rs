@@ -117,7 +117,14 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_image_generation_turn(&mut mcp).await?;
+    start_image_generation_turn(
+        &mut mcp,
+        ThreadStartParams {
+            service_name: Some("chatgpt_cca".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
 
     let completed = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -144,6 +151,23 @@ async fn standalone_image_generation_returns_saved_path_hint_to_model() -> Resul
     assert_eq!(revised_prompt.as_deref(), Some("paint a blue whale"));
     assert_eq!(result, RESULT);
     assert_eq!(std::fs::read(&saved_path)?, TINY_PNG_BYTES);
+
+    let image_request = server
+        .received_requests()
+        .await
+        .context("failed to fetch received requests")?
+        .into_iter()
+        .find(|request| request.url.path() == "/api/codex/images/generations")
+        .context("image generation request should be sent")?;
+    assert_eq!(
+        image_request
+            .headers
+            .get("originator")
+            .context("standalone image generation should include the thread originator")?
+            .to_str()
+            .context("standalone image generation originator should be valid ASCII")?,
+        "chatgpt_cca"
+    );
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
@@ -226,7 +250,7 @@ async fn agentrouter_api_key_executes_standalone_image_generation() -> Result<()
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_image_generation_turn(&mut mcp).await?;
+    start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;
 
     let completed = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -297,7 +321,7 @@ async fn standalone_image_generation_failure_emits_terminal_item() -> Result<()>
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_image_generation_turn(&mut mcp).await?;
+    start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;
 
     let completed = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -426,7 +450,7 @@ async fn standalone_image_generation_is_exposed_directly_in_code_mode_only() -> 
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_image_generation_turn(&mut mcp).await?;
+    start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_notification_message("turn/completed"),
@@ -492,7 +516,7 @@ async fn code_mode_only_direct_image_generation_survives_slow_large_backend() ->
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    let thread_id = start_image_generation_turn(&mut mcp).await?;
+    let thread_id = start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;
 
     let completed = timeout(
         SLOW_IMAGE_READ_TIMEOUT,
@@ -565,9 +589,13 @@ async fn code_mode_only_direct_image_generation_survives_slow_large_backend() ->
     Ok(())
 }
 
-async fn start_image_generation_turn(mcp: &mut TestAppServer) -> Result<String> {
+async fn start_image_generation_turn(
+    mcp: &mut TestAppServer,
+    thread_start_params: ThreadStartParams,
+) -> Result<String> {
     start_turn(
         mcp,
+        thread_start_params,
         vec![V2UserInput::Text {
             text: "Generate an image".to_string(),
             text_elements: Vec::new(),
@@ -619,7 +647,15 @@ async fn run_image_edit_test(
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
-    start_turn(&mut mcp, input).await?;
+    start_turn(
+        &mut mcp,
+        ThreadStartParams {
+            service_name: Some("chatgpt_cca".to_string()),
+            ..Default::default()
+        },
+        input,
+    )
+    .await?;
     timeout(
         DEFAULT_READ_TIMEOUT,
         wait_for_image_generation_completed(&mut mcp),
@@ -636,16 +672,29 @@ async fn run_image_edit_test(
         .received_requests()
         .await
         .context("failed to fetch received requests")?;
-    Ok(requests
+    let image_request = requests
         .iter()
         .find(|request| request.url.path() == "/api/codex/images/edits")
-        .context("image edit request should be sent")?
-        .body_json::<serde_json::Value>()?)
+        .context("image edit request should be sent")?;
+    assert_eq!(
+        image_request
+            .headers
+            .get("originator")
+            .context("standalone image edit should include the thread originator")?
+            .to_str()
+            .context("standalone image edit originator should be valid ASCII")?,
+        "chatgpt_cca"
+    );
+    Ok(image_request.body_json::<serde_json::Value>()?)
 }
 
-async fn start_turn(mcp: &mut TestAppServer, input: Vec<V2UserInput>) -> Result<String> {
+async fn start_turn(
+    mcp: &mut TestAppServer,
+    thread_start_params: ThreadStartParams,
+    input: Vec<V2UserInput>,
+) -> Result<String> {
     let thread_req = mcp
-        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .send_thread_start_request_with_auto_env(thread_start_params)
         .await?;
     let thread_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,

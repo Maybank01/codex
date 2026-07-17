@@ -229,7 +229,7 @@ pub type SharedModelsManager = Arc<dyn ModelsManager>;
 pub struct OpenAiModelsManager {
     remote_models: RwLock<Vec<ModelInfo>>,
     etag: RwLock<Option<String>>,
-    cache_manager: ModelsCacheManager,
+    cache_manager: Option<ModelsCacheManager>,
     endpoint_client: SharedModelsEndpointClient,
     auth_manager: Option<Arc<AuthManager>>,
 }
@@ -249,7 +249,26 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
-        let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
+        Self::new_with_cache_manager(
+            Some(ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL)),
+            endpoint_client,
+            auth_manager,
+        )
+    }
+
+    /// Construct an OpenAI-compatible model manager with caching disabled.
+    pub fn new_without_cache(
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> Self {
+        Self::new_with_cache_manager(/*cache_manager*/ None, endpoint_client, auth_manager)
+    }
+
+    fn new_with_cache_manager(
+        cache_manager: Option<ModelsCacheManager>,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> Self {
         let remote_models = load_remote_models_from_file().unwrap_or_default();
         Self {
             remote_models: RwLock::new(remote_models),
@@ -333,7 +352,9 @@ impl OpenAiModelsManager {
     async fn refresh_if_new_etag(&self, etag: String, http_client_factory: HttpClientFactory) {
         let current_etag = self.get_etag().await;
         if current_etag.clone().is_some() && current_etag.as_deref() == Some(etag.as_str()) {
-            if let Err(err) = self.cache_manager.renew_cache_ttl().await {
+            if let Some(cache_manager) = self.cache_manager.as_ref()
+                && let Err(err) = cache_manager.renew_cache_ttl().await
+            {
                 error!("failed to renew cache TTL: {err}");
             }
             return;
@@ -395,14 +416,16 @@ impl OpenAiModelsManager {
             .await?;
         self.apply_remote_models(models.clone()).await;
         *self.etag.write().await = etag.clone();
-        self.cache_manager
-            .persist_cache(
-                &models,
-                etag,
-                client_version,
-                self.endpoint_client.model_cache_key(),
-            )
-            .await;
+        if let Some(cache_manager) = self.cache_manager.as_ref() {
+            cache_manager
+                .persist_cache(
+                    &models,
+                    etag,
+                    client_version,
+                    self.endpoint_client.model_cache_key(),
+                )
+                .await;
+        }
         Ok(())
     }
 
@@ -450,13 +473,15 @@ impl OpenAiModelsManager {
 
     /// Attempt to satisfy the refresh from the cache when it matches the provider and TTL.
     async fn try_load_cache(&self) -> bool {
+        let Some(cache_manager) = self.cache_manager.as_ref() else {
+            return false;
+        };
         let _timer =
             codex_otel::start_global_timer("codex.remote_models.load_cache.duration_ms", &[]);
         let client_version = crate::client_version_to_whole();
         info!(client_version, "models cache: evaluating cache eligibility");
         let provider_cache_key = self.endpoint_client.model_cache_key();
-        let cache = match self
-            .cache_manager
+        let cache = match cache_manager
             .load_fresh(&client_version, provider_cache_key.as_deref())
             .await
         {
