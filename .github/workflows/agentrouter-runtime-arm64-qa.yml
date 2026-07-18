@@ -1,10 +1,14 @@
 name: agentrouter-runtime-arm64-qa
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
+      arch:
+        description: Native macOS architecture to validate.
+        required: true
+        type: string
       shell_url:
-        description: Public prerelease URL for the signed/notarized arm64 Shell ZIP.
+        description: Public prerelease URL for the signed/notarized Shell ZIP.
         required: true
         type: string
       shell_sha256:
@@ -12,7 +16,31 @@ on:
         required: true
         type: string
       core_url:
-        description: Public prerelease URL for the signed/notarized arm64 Core ZIP.
+        description: Public prerelease URL for the signed/notarized Core ZIP.
+        required: true
+        type: string
+      core_sha256:
+        description: Expected lowercase SHA-256 for the Core ZIP.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Native macOS architecture to validate.
+        required: true
+        default: arm64
+        type: choice
+        options: [arm64, x64]
+      shell_url:
+        description: Public prerelease URL for the signed/notarized Shell ZIP.
+        required: true
+        type: string
+      shell_sha256:
+        description: Expected lowercase SHA-256 for the Shell ZIP.
+        required: true
+        type: string
+      core_url:
+        description: Public prerelease URL for the signed/notarized Core ZIP.
         required: true
         type: string
       core_sha256:
@@ -25,13 +53,14 @@ permissions:
 
 jobs:
   native-runtime-qa:
-    name: Native Apple silicon Runtime composition QA
-    runs-on: macos-15
+    name: Native macOS ${{ inputs.arch }} Runtime composition QA
+    runs-on: ${{ inputs.arch == 'arm64' && 'macos-15' || 'macos-15-intel' }}
     timeout-minutes: 60
     env:
       EXPECTED_SHELL_VERSION: "26.715.31251"
       EXPECTED_CORE_VERSION: "0.145.0-agentrouter.5"
       EXPECTED_CORE_SOURCE_SHA: "efe4fefe93850253945a75db7763c26dd50d5337"
+      EXPECTED_ARCH: ${{ inputs.arch }}
       SHELL_URL: ${{ inputs.shell_url }}
       SHELL_SHA256: ${{ inputs.shell_sha256 }}
       CORE_URL: ${{ inputs.core_url }}
@@ -42,7 +71,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
+          case "$EXPECTED_ARCH" in
+            arm64) expected_machine="arm64" ;;
+            x64) expected_machine="x86_64" ;;
+            *) echo "::error::Unsupported QA architecture: $EXPECTED_ARCH"; exit 1 ;;
+          esac
+          test "$(uname -m)" = "$expected_machine"
           for digest in "$SHELL_SHA256" "$CORE_SHA256"; do
             [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
           done
@@ -74,7 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          qa_root="$RUNNER_TEMP/agentrouter-runtime-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          qa_root="$RUNNER_TEMP/agentrouter-runtime-${EXPECTED_ARCH}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$qa_root/input" "$qa_root/composition" "$qa_root/core-stage" "$qa_root/evidence" "$qa_root/home"
           echo "QA_ROOT=$qa_root" >> "$GITHUB_ENV"
           curl --fail --location --silent --show-error \
@@ -108,8 +142,12 @@ jobs:
           xcrun stapler validate -v "$shell_app" 2>&1 | tee "$QA_ROOT/evidence/shell-stapler.txt"
           codesign --verify --strict --verbose=4 "$core_executable" 2>&1 | tee "$QA_ROOT/evidence/core-codesign.txt"
           spctl --assess --type execute --verbose=4 "$core_executable" 2>&1 | tee "$QA_ROOT/evidence/core-spctl.txt"
-          test "$(lipo -archs "$shell_executable")" = "arm64"
-          test "$(lipo -archs "$core_executable")" = "arm64"
+          expected_lipo="$EXPECTED_ARCH"
+          if [[ "$EXPECTED_ARCH" == "x64" ]]; then
+            expected_lipo="x86_64"
+          fi
+          test "$(lipo -archs "$shell_executable")" = "$expected_lipo"
+          test "$(lipo -archs "$core_executable")" = "$expected_lipo"
           "$core_executable" --version 2>&1 | tee "$QA_ROOT/evidence/core-version.txt"
 
           export SHELL_MANIFEST="$QA_ROOT/composition/agentrouter-shell.json"
@@ -123,7 +161,7 @@ jobs:
 
           shell = json.loads(Path(os.environ["SHELL_MANIFEST"]).read_text(encoding="utf-8"))
           core = json.loads(Path(os.environ["CORE_MANIFEST"]).read_text(encoding="utf-8"))
-          if shell.get("version") != os.environ["EXPECTED_SHELL_VERSION"] or shell.get("arch") != "arm64":
+          if shell.get("version") != os.environ["EXPECTED_SHELL_VERSION"] or shell.get("arch") != os.environ["EXPECTED_ARCH"]:
               raise SystemExit("Shell manifest identity mismatch")
           if shell.get("requiredCore") != {
               "kind": "agentrouter-codex-core",
@@ -134,7 +172,7 @@ jobs:
               raise SystemExit("Shell external Core contract mismatch")
           if (
               core.get("version") != os.environ["EXPECTED_CORE_VERSION"]
-              or core.get("arch") != "arm64"
+              or core.get("arch") != os.environ["EXPECTED_ARCH"]
               or core.get("sourceGitSha") != os.environ["EXPECTED_CORE_SOURCE_SHA"]
               or core.get("sourceDirty") is not False
               or core.get("compatibleShellVersions") != [os.environ["EXPECTED_SHELL_VERSION"]]
@@ -187,12 +225,13 @@ jobs:
           from pathlib import Path
 
           root = Path(os.environ["QA_ROOT"])
-          (root / "evidence" / "runtime-arm64-qa.json").write_text(
+          arch = os.environ["EXPECTED_ARCH"]
+          (root / "evidence" / f"runtime-{arch}-qa.json").write_text(
               json.dumps(
                   {
                       "schemaVersion": 1,
                       "status": "passed",
-                      "runtimePlatform": "macos-arm64",
+                      "runtimePlatform": f"macos-{arch}",
                       "shellVersion": os.environ["EXPECTED_SHELL_VERSION"],
                       "coreVersion": os.environ["EXPECTED_CORE_VERSION"],
                       "shellSha256": os.environ["SHELL_SHA256"],
@@ -224,7 +263,7 @@ jobs:
         if: ${{ always() && env.QA_ROOT != '' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: agentrouter-runtime-arm64-qa-${{ github.sha }}
+          name: agentrouter-runtime-${{ inputs.arch }}-qa-${{ github.sha }}
           path: ${{ env.QA_ROOT }}/evidence
           if-no-files-found: error
           retention-days: 14

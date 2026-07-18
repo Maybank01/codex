@@ -3,6 +3,12 @@ name: agentrouter-core-macos
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: Build Core or validate already packaged macOS Runtime candidates.
+        required: true
+        default: build-core
+        type: choice
+        options: [build-core, runtime-native-qa]
       compatible_shell_version:
         description: Exact Codex Desktop Shell version supported by this Core.
         required: false
@@ -13,6 +19,16 @@ on:
         default: ad-hoc
         type: choice
         options: [ad-hoc, required]
+      runtime_arm64_spec:
+        description: JSON object containing exact arm64 Shell/Core URLs and SHA-256 values.
+        required: false
+        default: "{}"
+        type: string
+      runtime_x64_spec:
+        description: JSON object containing exact x64 Shell/Core URLs and SHA-256 values.
+        required: false
+        default: "{}"
+        type: string
   push:
     branches: [main]
     paths:
@@ -33,6 +49,7 @@ concurrency:
 jobs:
   test-packager:
     name: Validate macOS Core packager
+    if: inputs.operation != 'runtime-native-qa'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -175,3 +192,28 @@ jobs:
       - name: Print compiler cache statistics
         if: always()
         run: sccache --show-stats || true
+
+  runtime-native-qa:
+    name: Validate packaged Runtime - macOS ${{ matrix.arch }}
+    if: inputs.operation == 'runtime-native-qa'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            shell_url: ${{ fromJSON(inputs.runtime_arm64_spec).shell_url }}
+            shell_sha256: ${{ fromJSON(inputs.runtime_arm64_spec).shell_sha256 }}
+            core_url: ${{ fromJSON(inputs.runtime_arm64_spec).core_url }}
+            core_sha256: ${{ fromJSON(inputs.runtime_arm64_spec).core_sha256 }}
+          - arch: x64
+            shell_url: ${{ fromJSON(inputs.runtime_x64_spec).shell_url }}
+            shell_sha256: ${{ fromJSON(inputs.runtime_x64_spec).shell_sha256 }}
+            core_url: ${{ fromJSON(inputs.runtime_x64_spec).core_url }}
+            core_sha256: ${{ fromJSON(inputs.runtime_x64_spec).core_sha256 }}
+    uses: ./.github/workflows/agentrouter-runtime-arm64-qa.yml
+    with:
+      arch: ${{ matrix.arch }}
+      shell_url: ${{ matrix.shell_url }}
+      shell_sha256: ${{ matrix.shell_sha256 }}
+      core_url: ${{ matrix.core_url }}
+      core_sha256: ${{ matrix.core_sha256 }}
