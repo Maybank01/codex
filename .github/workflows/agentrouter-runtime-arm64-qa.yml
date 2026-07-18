@@ -1,0 +1,230 @@
+name: agentrouter-runtime-arm64-qa
+
+on:
+  workflow_dispatch:
+    inputs:
+      shell_url:
+        description: Public prerelease URL for the signed/notarized arm64 Shell ZIP.
+        required: true
+        type: string
+      shell_sha256:
+        description: Expected lowercase SHA-256 for the Shell ZIP.
+        required: true
+        type: string
+      core_url:
+        description: Public prerelease URL for the signed/notarized arm64 Core ZIP.
+        required: true
+        type: string
+      core_sha256:
+        description: Expected lowercase SHA-256 for the Core ZIP.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  native-runtime-qa:
+    name: Native Apple silicon Runtime composition QA
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      EXPECTED_SHELL_VERSION: "26.715.31251"
+      EXPECTED_CORE_VERSION: "0.145.0-agentrouter.5"
+      EXPECTED_CORE_SOURCE_SHA: "efe4fefe93850253945a75db7763c26dd50d5337"
+      SHELL_URL: ${{ inputs.shell_url }}
+      SHELL_SHA256: ${{ inputs.shell_sha256 }}
+      CORE_URL: ${{ inputs.core_url }}
+      CORE_SHA256: ${{ inputs.core_sha256 }}
+
+    steps:
+      - name: Validate immutable QA inputs and native runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          for digest in "$SHELL_SHA256" "$CORE_SHA256"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+          done
+          python3 - <<'PY'
+          import os
+          from urllib.parse import unquote, urlsplit
+
+          for name in ("SHELL_URL", "CORE_URL"):
+              raw = os.environ[name]
+              parsed = urlsplit(raw)
+              parts = [unquote(part) for part in parsed.path.split("/") if part]
+              if (
+                  parsed.scheme != "https"
+                  or parsed.hostname != "github.com"
+                  or parsed.port not in (None, 443)
+                  or parsed.username
+                  or parsed.password
+                  or parsed.query
+                  or parsed.fragment
+                  or len(parts) < 6
+                  or parts[0] != "Maybank01"
+                  or parts[2:4] != ["releases", "download"]
+                  or not parts[-1].endswith(".zip")
+              ):
+                  raise SystemExit(f"{name} is not a canonical Maybank01 GitHub release ZIP URL")
+          PY
+
+      - name: Download and bind exact Runtime archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="$RUNNER_TEMP/agentrouter-runtime-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$qa_root/input" "$qa_root/composition" "$qa_root/core-stage" "$qa_root/evidence" "$qa_root/home"
+          echo "QA_ROOT=$qa_root" >> "$GITHUB_ENV"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 2 \
+            --output "$qa_root/input/shell.zip" "$SHELL_URL"
+          curl --fail --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' --retry 4 --retry-delay 2 \
+            --output "$qa_root/input/core.zip" "$CORE_URL"
+          printf '%s  %s\n' "$SHELL_SHA256" "$qa_root/input/shell.zip" | shasum -a 256 --check
+          printf '%s  %s\n' "$CORE_SHA256" "$qa_root/input/core.zip" | shasum -a 256 --check
+          shasum -a 256 "$qa_root/input"/*.zip | tee "$qa_root/evidence/archive-sha256.txt"
+          /usr/bin/ditto -x -k "$qa_root/input/shell.zip" "$qa_root/composition"
+          /usr/bin/ditto -x -k "$qa_root/input/core.zip" "$qa_root/core-stage"
+          cp -p "$qa_root/core-stage/codex" "$qa_root/composition/codex"
+          cp -p "$qa_root/core-stage/agentrouter-core.json" "$qa_root/composition/agentrouter-core.json"
+
+      - name: Validate manifests layout signatures notarization and architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          shell_app="$QA_ROOT/composition/Codex.app"
+          shell_executable="$shell_app/Contents/MacOS/Codex"
+          core_executable="$QA_ROOT/composition/codex"
+          test -d "$shell_app"
+          test -x "$shell_executable"
+          test -x "$core_executable"
+          test ! -e "$shell_app/Contents/Resources/codex"
+
+          codesign --verify --deep --strict --verbose=4 "$shell_app" 2>&1 | tee "$QA_ROOT/evidence/shell-codesign.txt"
+          spctl --assess --type execute --verbose=4 "$shell_app" 2>&1 | tee "$QA_ROOT/evidence/shell-spctl.txt"
+          xcrun stapler validate -v "$shell_app" 2>&1 | tee "$QA_ROOT/evidence/shell-stapler.txt"
+          codesign --verify --strict --verbose=4 "$core_executable" 2>&1 | tee "$QA_ROOT/evidence/core-codesign.txt"
+          spctl --assess --type execute --verbose=4 "$core_executable" 2>&1 | tee "$QA_ROOT/evidence/core-spctl.txt"
+          test "$(lipo -archs "$shell_executable")" = "arm64"
+          test "$(lipo -archs "$core_executable")" = "arm64"
+          "$core_executable" --version 2>&1 | tee "$QA_ROOT/evidence/core-version.txt"
+
+          export SHELL_MANIFEST="$QA_ROOT/composition/agentrouter-shell.json"
+          export CORE_MANIFEST="$QA_ROOT/composition/agentrouter-core.json"
+          export CORE_EXECUTABLE="$core_executable"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          shell = json.loads(Path(os.environ["SHELL_MANIFEST"]).read_text(encoding="utf-8"))
+          core = json.loads(Path(os.environ["CORE_MANIFEST"]).read_text(encoding="utf-8"))
+          if shell.get("version") != os.environ["EXPECTED_SHELL_VERSION"] or shell.get("arch") != "arm64":
+              raise SystemExit("Shell manifest identity mismatch")
+          if shell.get("requiredCore") != {
+              "kind": "agentrouter-codex-core",
+              "mode": "external",
+              "environmentVariable": "CODEX_CLI_PATH",
+              "bundledPathMustBeAbsent": "Codex.app/Contents/Resources/codex",
+          }:
+              raise SystemExit("Shell external Core contract mismatch")
+          if (
+              core.get("version") != os.environ["EXPECTED_CORE_VERSION"]
+              or core.get("arch") != "arm64"
+              or core.get("sourceGitSha") != os.environ["EXPECTED_CORE_SOURCE_SHA"]
+              or core.get("sourceDirty") is not False
+              or core.get("compatibleShellVersions") != [os.environ["EXPECTED_SHELL_VERSION"]]
+          ):
+              raise SystemExit("Core manifest identity or compatibility mismatch")
+          executable = Path(os.environ["CORE_EXECUTABLE"])
+          digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+          files = core.get("files")
+          if not isinstance(files, list) or len(files) != 1 or files[0] != {
+              "path": "codex",
+              "size": executable.stat().st_size,
+              "sha256": digest,
+          }:
+              raise SystemExit("Core payload digest does not match its manifest")
+          PY
+
+      - name: Launch composed Runtime with external Core
+        shell: bash
+        run: |
+          set -euo pipefail
+          shell_executable="$QA_ROOT/composition/Codex.app/Contents/MacOS/Codex"
+          core_executable="$QA_ROOT/composition/codex"
+          HOME="$QA_ROOT/home" CODEX_CLI_PATH="$core_executable" \
+            "$shell_executable" \
+            > "$QA_ROOT/evidence/shell-stdout.log" \
+            2> "$QA_ROOT/evidence/shell-stderr.log" &
+          runtime_pid=$!
+          echo "$runtime_pid" > "$QA_ROOT/runtime.pid"
+          sleep 20
+          if ! kill -0 "$runtime_pid" >/dev/null 2>&1; then
+            sed -n '1,200p' "$QA_ROOT/evidence/shell-stderr.log" || true
+            echo "::error::Composed Runtime exited before the native launch observation window."
+            exit 1
+          fi
+          ps -p "$runtime_pid" -o pid=,ppid=,etime=,command= | tee "$QA_ROOT/evidence/runtime-process.txt"
+          kill -TERM "$runtime_pid"
+          for _ in $(seq 1 30); do
+            if ! kill -0 "$runtime_pid" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$runtime_pid" >/dev/null 2>&1; then
+            echo "::error::Composed Runtime did not terminate after SIGTERM."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["QA_ROOT"])
+          (root / "evidence" / "runtime-arm64-qa.json").write_text(
+              json.dumps(
+                  {
+                      "schemaVersion": 1,
+                      "status": "passed",
+                      "runtimePlatform": "macos-arm64",
+                      "shellVersion": os.environ["EXPECTED_SHELL_VERSION"],
+                      "coreVersion": os.environ["EXPECTED_CORE_VERSION"],
+                      "shellSha256": os.environ["SHELL_SHA256"],
+                      "coreSha256": os.environ["CORE_SHA256"],
+                      "sourceCommit": os.environ["GITHUB_SHA"],
+                      "runId": os.environ["GITHUB_RUN_ID"],
+                      "productionPointerChanged": False,
+                  },
+                  indent=2,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Stop Runtime after failure
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${QA_ROOT:-}" ] && [ -f "$QA_ROOT/runtime.pid" ]; then
+            runtime_pid="$(cat "$QA_ROOT/runtime.pid")"
+            if [[ "$runtime_pid" =~ ^[0-9]+$ ]]; then
+              kill -TERM "$runtime_pid" >/dev/null 2>&1 || true
+            fi
+          fi
+
+      - name: Upload native Runtime QA evidence
+        if: ${{ always() && env.QA_ROOT != '' }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: agentrouter-runtime-arm64-qa-${{ github.sha }}
+          path: ${{ env.QA_ROOT }}/evidence
+          if-no-files-found: error
+          retention-days: 14
