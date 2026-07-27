@@ -250,6 +250,17 @@ fn test_agentrouter_api_key_extensions_require_explicit_provider_and_auth() {
     provider.name = "AgentRouter".to_string();
     provider.base_url = None;
     assert!(!provider.supports_agentrouter_api_key_extensions(Some(AuthMode::ApiKey)));
+
+    provider.base_url = Some("http://127.0.0.1:43123/v1".to_string());
+    provider.requires_openai_auth = false;
+    provider.env_key = Some("AGENTROUTER_API_KEY".to_string());
+    assert!(provider.uses_agentrouter_managed_auth());
+    assert!(provider.supports_agentrouter_api_key_extensions(None));
+    assert!(provider.supports_remote_compaction());
+
+    provider.env_key = Some("OTHER_API_KEY".to_string());
+    assert!(!provider.uses_agentrouter_managed_auth());
+    assert!(!provider.supports_agentrouter_api_key_extensions(None));
 }
 
 #[test]

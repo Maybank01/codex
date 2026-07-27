@@ -35,6 +35,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 const AGENTROUTER_PROVIDER_NAME: &str = "AgentRouter";
+const AGENTROUTER_API_KEY_ENV: &str = "AGENTROUTER_API_KEY";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
@@ -51,6 +52,16 @@ const AMAZON_BEDROCK_MANTLE_CLIENT_AGENT_VALUE: &str = "codex";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+
+fn is_agentrouter_loopback_base_url(base_url: &str) -> bool {
+    let Some(port_and_path) = base_url.strip_prefix("http://127.0.0.1:") else {
+        return false;
+    };
+    let Some((port, path)) = port_and_path.split_once('/') else {
+        return false;
+    };
+    port.parse::<u16>().is_ok_and(|port| port != 0) && path == "v1"
+}
 
 /// Wire protocol that the provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
@@ -408,16 +419,35 @@ impl ModelProviderInfo {
             })
     }
 
-    /// Returns whether this provider is the explicit AgentRouter API-key route
-    /// that may use OpenAI-compatible Codex extensions.
-    pub fn supports_agentrouter_api_key_extensions(&self, auth_mode: Option<AuthMode>) -> bool {
-        self.requires_openai_auth
+    /// Returns whether this provider is the AgentRouter-managed loopback route.
+    ///
+    /// The exact environment-variable name is part of the trust boundary: a
+    /// generic third-party provider named "AgentRouter" must not silently gain
+    /// first-party-compatible extensions.
+    pub fn uses_agentrouter_managed_auth(&self) -> bool {
+        !self.requires_openai_auth
             && self.name.eq_ignore_ascii_case(AGENTROUTER_PROVIDER_NAME)
             && self
                 .base_url
                 .as_deref()
-                .is_some_and(|base_url| !base_url.trim().is_empty())
-            && auth_mode == Some(AuthMode::ApiKey)
+                .is_some_and(is_agentrouter_loopback_base_url)
+            && self
+                .env_key
+                .as_deref()
+                .is_some_and(|env_key| env_key == AGENTROUTER_API_KEY_ENV)
+    }
+
+    /// Returns whether this provider is an explicit AgentRouter API-key route
+    /// that may use OpenAI-compatible Codex extensions.
+    pub fn supports_agentrouter_api_key_extensions(&self, auth_mode: Option<AuthMode>) -> bool {
+        self.uses_agentrouter_managed_auth()
+            || (self.requires_openai_auth
+                && self.name.eq_ignore_ascii_case(AGENTROUTER_PROVIDER_NAME)
+                && self
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|base_url| !base_url.trim().is_empty())
+                && auth_mode == Some(AuthMode::ApiKey))
     }
 
     pub fn is_amazon_bedrock(&self) -> bool {
@@ -425,7 +455,9 @@ impl ModelProviderInfo {
     }
 
     pub fn supports_remote_compaction(&self) -> bool {
-        self.is_openai() || is_azure_responses_provider(&self.name, self.base_url.as_deref())
+        self.is_openai()
+            || is_azure_responses_provider(&self.name, self.base_url.as_deref())
+            || self.uses_agentrouter_managed_auth()
     }
 
     pub fn has_command_auth(&self) -> bool {

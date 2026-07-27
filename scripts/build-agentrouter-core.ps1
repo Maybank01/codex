@@ -50,6 +50,28 @@ $version = $versionMatch.Groups[1].Value
 if ($version -cne [string]$releaseConfig.version) {
     throw "Cargo version $version does not match AgentRouter release config version $($releaseConfig.version)."
 }
+$upstreamVersion = [string]$releaseConfig.upstream_version
+$agentRouterVersion = [string]$releaseConfig.agentrouter_version
+$packageRevision = [int]$releaseConfig.package_revision
+$releaseSequence = [int]$releaseConfig.release_sequence
+$displayVersion = [string]$releaseConfig.display_version
+if ($upstreamVersion -cnotmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid upstream Core version: $upstreamVersion."
+}
+if ($agentRouterVersion -cnotmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid AgentRouter Core version: $agentRouterVersion."
+}
+if ($packageRevision -lt 1 -or $releaseSequence -lt 1) {
+    throw "AgentRouter package revision and release sequence must be positive."
+}
+$expectedInternalVersion = "$upstreamVersion-agentrouter.$agentRouterVersion"
+if ($version -cne $expectedInternalVersion) {
+    throw "Core version $version does not match upstream/custom versions ($expectedInternalVersion)."
+}
+$expectedDisplayVersion = "u$upstreamVersion-ar$agentRouterVersion-r$packageRevision"
+if ($displayVersion -cne $expectedDisplayVersion) {
+    throw "Display version $displayVersion does not match $expectedDisplayVersion."
+}
 
 $sourceSha = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) {
@@ -140,7 +162,7 @@ $signatureStatus = [string](Get-AuthenticodeSignature -LiteralPath $resolvedBina
 
 $resolvedOutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 [System.IO.Directory]::CreateDirectory($resolvedOutputDirectory) | Out-Null
-$artifactName = "CodexCore-$artifactPlatform-$version"
+$artifactName = "CodexCore-$artifactPlatform-$displayVersion"
 $archivePath = Join-Path $resolvedOutputDirectory "$artifactName.zip"
 $checksumPath = Join-Path $resolvedOutputDirectory "$artifactName.zip.sha256"
 $stagingRoot = Join-Path (
@@ -157,6 +179,11 @@ try {
         schemaVersion = 1
         kind = "agentrouter-codex-core"
         version = $version
+        displayVersion = $displayVersion
+        upstreamVersion = $upstreamVersion
+        agentrouterVersion = $agentRouterVersion
+        packageRevision = $packageRevision
+        releaseSequence = $releaseSequence
         entrypoint = "resources/codex.exe"
         compatibleShellVersions = @($CompatibleShellVersions)
         upstreamGitSha = $upstreamSha
@@ -225,6 +252,7 @@ try {
 
 [PSCustomObject]@{
     Version = $version
+    DisplayVersion = $displayVersion
     ArchivePath = $archivePath
     ChecksumPath = $checksumPath
     BinarySha256 = $binarySha256

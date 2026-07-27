@@ -47,6 +47,7 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 
 const RESULT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const TINY_PNG_BYTES: &[u8] = &[
@@ -180,7 +181,7 @@ async fn agentrouter_api_key_executes_standalone_image_generation() -> Result<()
     let server = responses::start_mock_server().await;
     mount_image_response(&server).await;
     Mock::given(method("GET"))
-        .and(path("/api/codex/models"))
+        .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "models": [] })))
         .mount(&server)
         .await;
@@ -215,14 +216,12 @@ async fn agentrouter_api_key_executes_standalone_image_generation() -> Result<()
         &server.uri(),
         ImagegenTestMode::AgentRouterApiKey,
     )?;
-    std::fs::write(
-        codex_home.path().join("auth.json"),
-        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-agentrouter-key"}"#,
-    )?;
-
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("AGENTROUTER_API_KEY", Some("test-agentrouter-key")),
+        ])
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -481,14 +480,12 @@ async fn code_mode_only_direct_image_generation_survives_slow_large_backend() ->
         &server.uri(),
         ImagegenTestMode::AgentRouterCodeModeOnly,
     )?;
-    std::fs::write(
-        codex_home.path().join("auth.json"),
-        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"test-agentrouter-key"}"#,
-    )?;
-
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("AGENTROUTER_API_KEY", Some("test-agentrouter-key")),
+        ])
         .build()
         .await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -693,7 +690,7 @@ async fn wait_for_image_generation_completed(
 
 async fn mount_image_response(server: &MockServer) {
     Mock::given(method("POST"))
-        .and(path("/api/codex/images/generations"))
+        .and(path_regex(".*/images/generations"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "created": 1,
             "data": [{"b64_json": RESULT}],
@@ -706,7 +703,7 @@ async fn mount_image_response(server: &MockServer) {
 #[cfg(windows)]
 async fn mount_delayed_image_response(server: &MockServer, result: &str, delay: Duration) {
     Mock::given(method("POST"))
-        .and(path("/api/codex/images/generations"))
+        .and(path_regex(".*/images/generations"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_delay(delay)
@@ -857,15 +854,24 @@ fn create_config_toml(
     server_uri: &str,
     mode: ImagegenTestMode,
 ) -> std::io::Result<()> {
-    let (provider_name, feature_config) = match mode {
-        ImagegenTestMode::Direct => ("OpenAI", ""),
+    let (provider_name, provider_path, provider_auth, feature_config) = match mode {
+        ImagegenTestMode::Direct => ("OpenAI", "api/codex", "requires_openai_auth = true", ""),
         ImagegenTestMode::CodeModeOnly => (
             "OpenAI",
+            "api/codex",
+            "requires_openai_auth = true",
             "code_mode_only = true\n\n[features.code_mode]\ndirect_only_tool_namespaces = [\"image_gen\"]",
         ),
-        ImagegenTestMode::AgentRouterApiKey => ("AgentRouter", ""),
+        ImagegenTestMode::AgentRouterApiKey => (
+            "AgentRouter",
+            "v1",
+            r#"env_key = "AGENTROUTER_API_KEY""#,
+            "",
+        ),
         ImagegenTestMode::AgentRouterCodeModeOnly => (
             "AgentRouter",
+            "v1",
+            r#"env_key = "AGENTROUTER_API_KEY""#,
             "code_mode_only = true\n\n[features.code_mode]\ndirect_only_tool_namespaces = [\"image_gen\"]",
         ),
     };
@@ -884,12 +890,12 @@ chatgpt_base_url = "{server_uri}"
 
 [model_providers.openai-custom]
 name = "{provider_name}"
-base_url = "{server_uri}/api/codex"
+base_url = "{server_uri}/{provider_path}"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
 supports_websockets = false
-requires_openai_auth = true
+{provider_auth}
 "#
         ),
     )

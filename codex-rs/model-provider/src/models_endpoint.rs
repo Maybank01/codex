@@ -376,20 +376,17 @@ mod tests {
     #[test]
     fn agentrouter_api_key_provider_enables_model_discovery() {
         let mut provider = ModelProviderInfo::create_openai_provider(Some(
-            "https://agentrouter.top/v1".to_string(),
+            "http://127.0.0.1:43123/v1".to_string(),
         ));
         provider.name = "AgentRouter".to_string();
-        let endpoint = OpenAiModelsEndpoint::new(
-            provider,
-            Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
-                "test-api-key",
-            ))),
-        );
+        provider.requires_openai_auth = false;
+        provider.env_key = Some("AGENTROUTER_API_KEY".to_string());
+        let endpoint = OpenAiModelsEndpoint::new(provider, /*auth_manager*/ None);
 
         assert!(endpoint.supports_api_key_model_discovery());
         assert_eq!(
             endpoint.model_cache_key().as_deref(),
-            Some("agentrouter|https://agentrouter.top/v1")
+            Some("agentrouter|http://127.0.0.1:43123/v1")
         );
     }
 

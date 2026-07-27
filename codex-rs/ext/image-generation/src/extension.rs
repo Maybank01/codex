@@ -39,7 +39,8 @@ impl ImageGenerationExtensionConfig {
         Self {
             available: config.model_provider.is_openai()
                 || config.model_provider.requires_openai_auth
-                || config.model_provider.uses_openai_actor_authorization(),
+                || config.model_provider.uses_openai_actor_authorization()
+                || config.model_provider.uses_agentrouter_managed_auth(),
             provider: config.model_provider.clone(),
             save_root: resolve_save_root(config),
         }
