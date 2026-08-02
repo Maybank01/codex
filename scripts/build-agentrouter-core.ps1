@@ -18,6 +18,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $cargoRoot = Join-Path $repoRoot "codex-rs"
 $releaseConfigPath = Join-Path $PSScriptRoot "agentrouter-core-release.json"
 $releaseConfig = Get-Content -LiteralPath $releaseConfigPath -Raw | ConvertFrom-Json
+$releaseBranch = "agentrouter/runtime-components-v2"
+$releaseRemote = "fork"
+$releaseRemoteUrl = "https://github.com/Maybank01/codex.git"
+$releaseRemoteRef = "refs/heads/$releaseBranch"
 
 if ($null -eq $CompatibleShellVersions -or $CompatibleShellVersions.Count -eq 0) {
     $CompatibleShellVersions = @($releaseConfig.compatible_shell_versions)
@@ -77,11 +81,57 @@ $sourceSha = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw "Could not resolve the source Git SHA."
 }
+$sourceBranch = (& git -C $repoRoot branch --show-current).Trim()
 $gitStatus = (& git -C $repoRoot status --porcelain --untracked-files=all) -join "`n"
 if (-not [string]::IsNullOrWhiteSpace($gitStatus) -and -not $AllowDirty) {
     throw "Refusing to build a release artifact from a dirty worktree. Pass -AllowDirty for a development artifact."
 }
 $sourceDirty = -not [string]::IsNullOrWhiteSpace($gitStatus)
+$sourceRemoteSha = $null
+$productionEligible = $false
+if (-not $AllowDirty) {
+    if (
+        -not [string]::IsNullOrWhiteSpace($sourceBranch) -and
+        $sourceBranch -cne $releaseBranch
+    ) {
+        throw "Release Core must be built from branch $releaseBranch; got $sourceBranch. Pass -AllowDirty only for development evidence."
+    }
+    $actualRemoteUrl = (& git -C $repoRoot remote get-url $releaseRemote).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not resolve release remote $releaseRemote."
+    }
+    $normalizeRemoteUrl = {
+        param([string]$Value)
+        $normalized = $Value.Trim().Replace("\", "/")
+        if ($normalized.StartsWith("git@github.com:")) {
+            $normalized = "https://github.com/" + $normalized.Substring("git@github.com:".Length)
+        }
+        $normalized = $normalized.TrimEnd("/")
+        if ($normalized.EndsWith(".git")) {
+            $normalized = $normalized.Substring(0, $normalized.Length - 4)
+        }
+        return $normalized.ToLowerInvariant()
+    }
+    if ((& $normalizeRemoteUrl $actualRemoteUrl) -cne (& $normalizeRemoteUrl $releaseRemoteUrl)) {
+        throw "Release remote $releaseRemote must be $releaseRemoteUrl; got $actualRemoteUrl."
+    }
+    $remoteLines = @(& git -C $repoRoot ls-remote --heads $releaseRemote $releaseRemoteRef)
+    if ($LASTEXITCODE -ne 0 -or $remoteLines.Count -ne 1) {
+        throw "Release remote ref $releaseRemote/$releaseRemoteRef did not resolve exactly once."
+    }
+    $remoteMatch = [regex]::Match(
+        [string]$remoteLines[0],
+        '^([0-9a-f]{40})\s+refs/heads/agentrouter/runtime-components-v2$'
+    )
+    if (-not $remoteMatch.Success) {
+        throw "Release remote ref $releaseRemote/$releaseRemoteRef returned an invalid commit."
+    }
+    $sourceRemoteSha = $remoteMatch.Groups[1].Value
+    if ($sourceSha -cne $sourceRemoteSha) {
+        throw "Release Core source HEAD $sourceSha does not match pushed fixed branch $sourceRemoteSha."
+    }
+    $productionEligible = $true
+}
 
 $upstreamSha = [string]$releaseConfig.upstream_sha
 & git -C $repoRoot merge-base --is-ancestor $upstreamSha HEAD
@@ -193,7 +243,12 @@ try {
         rustTarget = $Target
         upstreamRepository = [string]$releaseConfig.upstream_repository
         sourceGitSha = $sourceSha
+        sourceBranch = $(if ([string]::IsNullOrWhiteSpace($sourceBranch)) { "<detached>" } else { $sourceBranch })
+        releaseBranch = $releaseBranch
+        sourceRemote = $releaseRemote
+        sourceRemoteSha = $sourceRemoteSha
         sourceDirty = $sourceDirty
+        productionEligible = $productionEligible
         signatureStatus = $signatureStatus
         files = @(
             [ordered]@{
@@ -257,7 +312,10 @@ try {
     ChecksumPath = $checksumPath
     BinarySha256 = $binarySha256
     SourceSha = $sourceSha
+    SourceBranch = $sourceBranch
+    SourceRemoteSha = $sourceRemoteSha
     SourceDirty = $sourceDirty
+    ProductionEligible = $productionEligible
     CompatibleShellVersions = @($CompatibleShellVersions)
     SourcePackageVersion = $SourcePackageVersion
 }
