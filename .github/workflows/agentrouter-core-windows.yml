@@ -38,6 +38,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify fixed release source
+        shell: pwsh
+        run: |
+          git remote add fork https://github.com/Maybank01/codex.git
+          git fetch fork agentrouter/runtime-components-v2
+          $checkedOutSha = (git rev-parse HEAD).Trim()
+          $fixedBranchSha = (git rev-parse refs/remotes/fork/agentrouter/runtime-components-v2).Trim()
+          if ($checkedOutSha -cne $fixedBranchSha) {
+            throw "Workflow source $checkedOutSha does not match fixed branch $fixedBranchSha."
+          }
+          git checkout -B agentrouter/runtime-components-v2 $fixedBranchSha
+
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           targets: ${{ env.TARGET }}
@@ -128,6 +140,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify fixed release source
+        shell: pwsh
+        run: |
+          git remote add fork https://github.com/Maybank01/codex.git
+          git fetch fork agentrouter/runtime-components-v2
+          $checkedOutSha = (git rev-parse HEAD).Trim()
+          $fixedBranchSha = (git rev-parse refs/remotes/fork/agentrouter/runtime-components-v2).Trim()
+          if ($checkedOutSha -cne $fixedBranchSha) {
+            throw "Workflow source $checkedOutSha does not match fixed branch $fixedBranchSha."
+          }
+          git checkout -B agentrouter/runtime-components-v2 $fixedBranchSha
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
