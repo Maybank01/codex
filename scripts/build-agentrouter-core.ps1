@@ -273,7 +273,10 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
-        $entries = @($archive.Entries | ForEach-Object { $_.FullName })
+        $entries = @(
+            $archive.Entries |
+                ForEach-Object { $_.FullName.Replace("\", "/") }
+        )
     } finally {
         $archive.Dispose()
     }
